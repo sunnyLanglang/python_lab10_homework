@@ -1,145 +1,125 @@
 # -*- coding: utf-8 -*-
 import json, time, requests, webbrowser
-import pyaudio, vosk
-import win32com.client
+from datetime import datetime
+import pyaudio, vosk, pyttsx3
 
-# ===== 语音合成（win32com，选英文语音）=====
 def speak(text):
-    speaker = win32com.client.Dispatch("SAPI.SpVoice")
-    for voice in speaker.GetVoices():
-        if "David" in voice.GetDescription() or "Zira" in voice.GetDescription():
-            speaker.Voice = voice
-            break
-    speaker.Speak(text)
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 160)
+    # 选英文语音，找不到就用默认
+    for v in engine.getProperty('voices'):
+        if 'english' in v.id.lower() or 'zira' in v.name.lower() or 'david' in v.name.lower():
+            engine.setProperty('voice', v.id); break
+    engine.say(text); engine.runAndWait()
 
-# ===== 语音识别（无语法限制，自由识别单词）=====
 class Recognize:
-    def __init__(self):
-        model = vosk.Model('vosk-model-small-en-us-0.15')
-        self.rec = vosk.KaldiRecognizer(model, 16000)
-        pa = pyaudio.PyAudio()
-        self.stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000,
-                              input=True, frames_per_buffer=8000)
+    def __init__(self, model_path='vosk-model-small-en-us-0.15'):
+        self.rec = vosk.KaldiRecognizer(vosk.Model(model_path), 16000)
+        self.pa = pyaudio.PyAudio()
+        self.stream = self.pa.open(format=pyaudio.paInt16, channels=1,
+                                   rate=16000, input=True, frames_per_buffer=8000)
 
     def pause(self):
-        if self.stream and not self.stream.is_stopped():
-            self.stream.stop_stream()
-            time.sleep(0.05)
+        if self.stream.is_active(): self.stream.stop_stream()
+        time.sleep(0.05)
 
     def resume(self):
-        if self.stream and self.stream.is_stopped():
-            self.stream.start_stream()
-            time.sleep(0.05)
+        if self.stream.is_stopped(): self.stream.start_stream()
+        time.sleep(0.05)
 
     def listen(self):
         while True:
             data = self.stream.read(4000, exception_on_overflow=False)
-            if self.rec.AcceptWaveform(data):
-                res = json.loads(self.rec.Result())
-                if text := res.get('text'):
-                    yield text
+            if self.rec.AcceptWaveform(data) and (text := json.loads(self.rec.Result()).get('text', '')):
+                yield text
 
-# ===== 单词查询 API =====
+    def close(self):
+        try:
+            if self.stream:
+                if self.stream.is_active(): self.stream.stop_stream()
+                self.stream.close()
+            self.pa.terminate()
+        except: pass
+
 def lookup(word):
-    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(f'https://api.dictionaryapi.dev/api/v2/entries/en/{word}', timeout=10)
         return r.json() if r.status_code == 200 else None
-    except:
-        return None
+    except: return None
 
-def get_meaning(data):
+def get_info(data):
+    """返回 (meaning, example) 两个值"""
     try:
-        return data[0]['meanings'][0]['definitions'][0]['definition']
-    except:
-        return None
+        d = data[0]['meanings'][0]['definitions'][0]
+        return d.get('definition'), d.get('example')
+    except: return None, None
 
-def get_example(data):
-    try:
-        return data[0]['meanings'][0]['definitions'][0].get('example')
-    except:
-        return None
+# ---------- 主程序 ----------
+cur_word, cur_data = None, None
+rec = Recognize()
+rec.pause(); speak("Starting word assistant"); rec.resume()
+time.sleep(0.3)
+print("Commands: find <word>, meaning, example, save, link, exit")
 
-# ===== 全局变量：当前查询的单词和数据 =====
-cur_word = None
-cur_data = None
-
-# ===== 主程序 =====
-if __name__ == "__main__":
-    rec = Recognize()
-    rec.pause()
-    speak("Starting word assistant")
-    rec.resume()
-    time.sleep(0.5)
-    print("Commands: find <word>, meaning, example, save, link, exit")
-
+try:
     for text in rec.listen():
         print("->", text)
-        low = text.lower()
+        cmd = text.lower().strip()
+        rec.pause()
 
-        if 'exit' in low:
-            rec.pause(); speak("Goodbye"); rec.resume()
-            break
+        if 'exit' in cmd:
+            speak("Goodbye"); break
 
-        elif 'find' in low:
-            # 提取 find 后面的单词（如 "find apple" -> "apple"）
-            parts = low.split('find', 1)
-            if len(parts) > 1:
-                word = parts[1].strip()
-                rec.pause()
+        elif 'find' in cmd:
+            parts = cmd.split('find', 1)
+            if len(parts) > 1 and (word := parts[1].strip().split()[0]):
                 speak(f"Searching for {word}")
                 data = lookup(word)
                 if data:
                     cur_word, cur_data = word, data
-                    m = get_meaning(data)
-                    speak(f"Found. {m}" if m else "No definition")
+                    meaning, _ = get_info(data)
+                    speak(f"Found. {meaning}" if meaning else "Found, no definition")
                 else:
-                    speak(f"Word {word} not found")
-                rec.resume()
+                    speak(f"Could not find {word}")
+                    cur_word = cur_data = None
             else:
-                rec.pause(); speak("Say find followed by a word"); rec.resume()
+                speak("Say find followed by a word")
 
-        elif 'meaning' in low:
-            rec.pause()
+        elif 'meaning' in cmd:
             if cur_data:
-                m = get_meaning(cur_data)
-                speak(m if m else "No definition")
-            else:
-                speak("No word yet")
-            rec.resume()
+                meaning, _ = get_info(cur_data)
+                speak(meaning if meaning else "No definition")
+            else: speak("No word yet")
 
-        elif 'example' in low:
-            rec.pause()
+        elif 'example' in cmd:
             if cur_data:
-                ex = get_example(cur_data)
-                speak(ex if ex else "No example")
-            else:
-                speak("No word yet")
-            rec.resume()
+                _, example = get_info(cur_data)
+                speak(f"Example: {example}" if example else "No example")
+            else: speak("No word yet")
 
-        elif 'save' in low:
-            rec.pause()
-            if cur_data:
-                m = get_meaning(cur_data)
-                ex = get_example(cur_data)
-                with open('words.txt', 'a', encoding='utf-8') as f:
-                    f.write(f"Word: {cur_word}\nMeaning: {m}\n")
-                    if ex:
-                        f.write(f"Example: {ex}\n")
-                    f.write("-"*20 + "\n")
-                speak("Saved")
-            else:
-                speak("Nothing to save")
-            rec.resume()
+        elif 'save' in cmd:
+            if cur_word and cur_data:
+                meaning, example = get_info(cur_data)
+                try:
+                    with open('words.txt', 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n"
+                                f"Word: {cur_word}\nMeaning: {meaning or 'N/A'}\n"
+                                + (f"Example: {example}\n" if example else '')
+                                + '-'*30 + '\n')
+                    speak("Saved")
+                except: speak("Save failed")
+            else: speak("Nothing to save")
 
-        elif 'link' in low:
-            rec.pause()
+        elif 'link' in cmd:
             if cur_word:
                 webbrowser.open(f"https://dictionaryapi.dev/entries/en/{cur_word}")
                 speak("Opening link")
-            else:
-                speak("No word")
-            rec.resume()
+            else: speak("No word")
 
         else:
-            rec.pause(); speak("Unknown command"); rec.resume()
+            speak("Unknown command. Try: find, meaning, example, save, link, or exit.")
+
+        rec.resume()
+finally:
+    rec.close()
+    print("Assistant stopped.")
